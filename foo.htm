@@ -1,0 +1,250 @@
+<!doctype html>
+<style>
+  body { background: rgb(225, 221, 196); }
+  pre { margin: 0; border: 1px solid rgb(150,150,150) }
+</style>
+
+<pre id="myterm"></pre>
+<input type="text" class="tib" placeholder="tib" size="80">
+<audio id="beep" src="beep.wav"></audio>
+
+<pre class="s0"></pre>
+<pre class="c0"></pre>
+
+<script src="jquery-1.11.3.js"></script>
+<script>
+"use strict"
+var mem = [] // memory map
+var here = 1 // dictionary - can't use link = 0
+var sp0 = 300, sp = sp0 // parameter stack
+var tib0 = 400, tib = tib0 // text input buffer
+
+// The words:
+// : (colon)
+// POSTPONE
+// ' (tick)
+// are examples of parsing words that take their arguments from the user input device instead of the data stack.
+
+var fexit = 0, fabort = 0, fexpect = 0
+//var fcreate = 0, ftick = 0, fcolon = 0, fliteral = 0
+// function create(){ fcreate ++ }
+// function colon(){ fcolon = 1 }
+
+function pushstr( pt, tok ){
+	var cell = tok.length
+	for( var i = 1; i < parseInt( (tok.length + 4)/4 ) * 4; i ++ ){
+		cell <<= 8
+		cell |= i < tok.length + 1 ? tok.charCodeAt( i - 1 ) : 0
+		if( i % 4 === 3 ){
+			mem[ pt ++ ] = cell
+			cell = 0
+		}// if
+	} return pt
+}// pushstr	
+function str( adr ){
+	var cell = mem[ adr ++ ], n = cell >> 24
+	var s = ""; for( var i = 1; i < n + 1; i ++ ){
+		s += String.fromCharCode( ( cell >> ( 3 - i ) * 8 ) & 0xff )
+		if( i % 4 === 3 ){
+			cell = mem[ adr ++ ]
+		}// if
+	} return s
+}// str	
+function DOT_S(){
+	var n = sp - sp0; if( n ){
+		for( var i = 0; i < n; i ++ ){
+			$('pre#myterm')[0].innerText += mem[ sp - 1 - i ] + '\n'
+		}// for
+	} else {
+		$('pre#myterm')[0].innerText += " empty "
+	}// if
+}// DOT_S
+
+// : decade  10 0 do  i .  loop ;
+// which executes like this: decade <ret> 0 1 2 3 4 5 6 7 8 9 ok
+
+function DUP(){	mem[ sp ++ ] = mem[ sp - 1 ] } // ( n --- n n )
+
+// There are five FORTH words concerned with finding the address of the various word fields. They are:
+// 1) ' ( tick)
+// 2) PFAPTR ( Parameter Field Pointer Address) - ?RSC-FORTH User's guide
+// 3) CFA ( Code Field Address)
+// 4) LFA ( Link Field Address)
+// 5) NFA ( Name Field Address)
+function CFA(){	mem[ sp - 1 ] -= 1 }// ( pfa --- cfa )
+
+// cell  | byt0|  1  |  2  |  3  | description
+// ------+-----+-----+-----+-----+------------
+// nfa 0 |  4  |  d  |  a  |  t  | count-byte 'n' & name
+//     1 |  e  |  0  |  0  |  0  | "date"
+// lfa 2 | previous nfa, 0 eol   | link
+// cfa 3 |                       | code
+// pfa 4 | data                  | parameter
+function FIND()
+{	// adr1 adr2 --- pfa count-byte tf (ok)
+	// adr1 adr2 --- ff (?)
+	var adr2 = mem[ -- sp ], adr1 = mem[ -- sp ]
+	var n1 = mem[ adr1 ] >> 24, s1 = str( adr1 )
+	do {
+		var n2 = mem[ adr2 ] >> 24
+		if( n2 === n1 ){// count hit ?
+			if( str( adr2 ) === s1 ){
+				mem[ sp ++ ] = adr2 + parseInt( ( n2 + 4 ) / 4 ) + 2 // pfa
+				mem[ sp ++ ] = n2 // count byte
+				mem[ sp ++ ] = true
+				return
+			}// if str
+		}// if n
+	} while( adr2 = mem[ adr2 + parseInt( ( n2 + 4 ) / 4 ) ] ) // lnk
+	mem[ sp ++ ] = false
+}// FIND
+function ABORT(){
+	sp = sp0 // reset stack
+	fabort ++
+}
+var my_base
+function NUMBER(){ // ( addr --- d )
+	var s = str( mem[ -- sp ] ),  d = parseInt( s, mem[ my_base ] )
+	if( isNaN( d ) ){
+		ABORT()
+	} else {
+		mem[ sp ++ ] = d
+	}// if NaN
+}// NUMBER
+function dump(){
+	$('pre.s0').empty().text(
+		$.map( Array( sp - sp0 ), function( v, i ){
+			return [ sp - 1 - i , mem[ sp - 1 - i ] ].join(": ")
+		}).join('\n')
+	)// text
+}// dump
+function ret_handler( e ){
+	if( e.which === 13 ){ // return key
+		$('pre#myterm')[0].innerText += this.value + '\n'
+		$.each(
+			this.value.split(/\s/).filter(Boolean),
+			function( i , v ){
+				evl( v )
+				if( fabort ){
+					return false
+				}
+			}
+		); // each
+		this.value = null
+		if( fabort ){
+			$('pre#myterm')[0].innerText += " ? "
+			fabort = 0
+		} else {
+			if( !fexpect ){
+				$('pre#myterm')[0].innerText += " ok "
+			}// if expect
+		}// if abort
+		dump()
+	}// if return
+}// ret_handler
+function key_handler(e){
+	mem[ sp ++ ] = e.charCode
+	fexpect = 0
+	$('input.tib').off('.mytib').on( 'keypress.mytib', ret_handler )
+	return false // don't show key
+}// key_handler
+function KEY(){
+	$('input.tib').off('.mytib').on( 'keypress.mytib', key_handler )
+	fexpect ++
+}// KEY
+
+function EXECUTE(){ // ( cfa --- )
+	// The code address indicates code to be executed depending on word type:
+	// . colon-definition USER words
+	// . VARIABLE words
+	// . CONSTANT words
+	// . DOES> words
+	// . CODE-definition assembler words
+	var cfa = mem[ -- sp ]
+	mem[ cfa ]( cfa )
+}// EXECUTE
+function colon( cfa ){ // run-time
+	do {
+		cfa ++; mem[ cfa ]( cfa )
+	} while( !fexit )
+	fexit = 0
+}// colon
+function EXIT(){ fexit ++ }
+function variable( cfa ){ mem[ sp ++ ] = cfa + 1 }
+function constant( cfa ){ mem[ sp ++ ] = mem[ cfa + 1 ] }
+function FETCH(){ // ( adr --- n )
+	var adr = mem[ -- sp ]; mem[ sp ++ ] = mem[ adr ]
+}
+function STORE(){ // ( n adr --- )
+	var adr = mem[ -- sp ], n = mem[ -- sp ]; mem[ adr ] = n
+}
+function CR(){ $('pre#myterm')[0].innerText += '\n' }
+
+function defword( tok, lnk, plist ){
+	var nfa = here
+	here = pushstr( here, tok )
+	mem[ here ++ ] = lnk
+	for( var i = 0; i < plist.length; i ++ ){
+		mem[ here ++ ] = plist[ i ]
+	}// for
+	return nfa
+}// defword
+
+var latest = defword( ".s", 0, [ DOT_S ])
+latest = defword( "key", latest, [ KEY ])
+latest = defword( "base", latest, [ variable, 10 ])
+my_base = latest - 1 // base !
+latest = defword( "@", latest, [ FETCH ])
+latest = defword( "!", latest, [ STORE ])
+latest = defword( "cr", latest, [ CR ])
+
+// function tick(){ ftick ++ }
+// function comma(){ mem.push( st.pop() )}
+// function semicolon(){ fcolon = 0 }
+// function doesgt(){ fcolon = 2 }
+// function rtliteral(){ fliteral ++ }
+// function xtick(xt){ st.push(xt) }
+
+function evl( tok ){
+	pushstr(tib, tok )
+	mem[ sp ++ ] = tib // input buffer
+	mem[ sp ++ ] = latest // nfa
+	FIND() // ( a1 a2 --- pfa n tf ) or ( a1 a2 --- ff )
+	if( mem[ -- sp ] ){
+		var n = mem[ -- sp ] // count byte
+		CFA() // ( pfa --- cfa )
+		EXECUTE() // ( cfa --- )
+	} else {
+		mem[ sp ++ ] = tib
+		NUMBER() // ( a1 --- d )
+	}// if
+}// evl
+
+// Enter some numbers on the stack and display the stack contents.
+// 678 356
+// .S
+// 356
+// 678 OK
+// Type Q now and verify that the stack is cleared.
+// Q
+// Q ? .S
+// EMPTY OK
+// KEY <RETURN> A ( Type A) .S
+// 41
+//                                 <--- todo: i'm here
+// HEX 600 OK
+// DECIMAL OK
+// 15 CR EXPECT
+// 1234567890123450K
+// HEX 600 10 DUMP
+// 600 31 32 33 34 35 36 37 38 39 30 31 32 33 34 35 0
+// OK
+// : TEST-OP 5 * . ; <RETURN> OK
+
+$( document ).ready( function(){
+	dump()
+	$('pre#myterm')[0].innerText += " ok "
+	$( 'input.tib' ).off('.mytib').on( 'keypress.mytib', ret_handler ).focus()
+}) // ready
+</script>
+
