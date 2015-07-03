@@ -6,7 +6,6 @@
 
 <pre id="myterm"></pre>
 <input type="text" class="tib" placeholder="tib" size="80">
-<audio id="beep" src="beep.wav"></audio>
 
 <pre class="s0"></pre>
 <pre class="c0"></pre>
@@ -53,7 +52,8 @@ function str( adr ){
 function DOT_S(){
 	var n = sp - sp0; if( n ){
 		for( var i = 0; i < n; i ++ ){
-			$('pre#myterm')[0].innerText += mem[ sp - 1 - i ] + '\n'
+			$('pre#myterm')[0].innerText += mem[ sp - 1 - i ]
+				.toString( mem[ my_base ] ) + '\n'
 		}// for
 	} else {
 		$('pre#myterm')[0].innerText += " empty "
@@ -118,7 +118,7 @@ function dump(){
 		}).join('\n')
 	)// text
 }// dump
-function ret_handler( e ){
+function monitor_handler( e ){
 	if( e.which === 13 ){ // return key
 		$('pre#myterm')[0].innerText += this.value + '\n'
 		$.each(
@@ -141,17 +141,43 @@ function ret_handler( e ){
 		}// if abort
 		dump()
 	}// if return
-}// ret_handler
-function key_handler(e){
-	mem[ sp ++ ] = e.charCode
-	fexpect = 0
-	$('input.tib').off('.mytib').on( 'keypress.mytib', ret_handler )
-	return false // don't show key
-}// key_handler
-function KEY(){
+}// monitor_handler
+function KEY(){// ( --- char )
+	function key_handler(e){
+		mem[ sp ++ ] = e.charCode
+		fexpect = 0
+		$('input.tib').off('.mytib').on( 'keypress.mytib', monitor_handler )
+		$('pre#myterm')[0].innerText += " ok "
+		return false // don't show key
+	}// key_handler
+	fexpect = 1
 	$('input.tib').off('.mytib').on( 'keypress.mytib', key_handler )
-	fexpect ++
 }// KEY
+function EXPECT(){// ( adr n --- )
+	fexpect = mem[ -- sp ]
+	var adr = mem[ -- sp ]
+	function expect_handler(e){
+		fexpect --
+		if( fexpect === 0 || e.charCode === 13 ){// reached n or CR ?
+			if( fexpect ){
+				fexpect = 0
+			} else {
+				$('pre#myterm')[0].innerText += String.fromCharCode(
+					mem[ adr ++ ] = e.charCode
+				)
+			}// if
+			mem[ adr ++ ] = 0 // terminaten
+			$('input.tib').off('.mytib').on( 'keypress.mytib', monitor_handler )
+			$('pre#myterm')[0].innerText += " ok "
+		} else {
+			$('pre#myterm')[0].innerText += String.fromCharCode(
+				mem[ adr ++ ] = e.charCode
+			)
+		}
+		return false // don't show key in input element, show in myterm
+	}// expect_handler
+	$('input.tib').off('.mytib').on( 'keypress.mytib', expect_handler )
+}// EXPECT
 
 function EXECUTE(){ // ( cfa --- )
 	// The code address indicates code to be executed depending on word type:
@@ -163,12 +189,12 @@ function EXECUTE(){ // ( cfa --- )
 	var cfa = mem[ -- sp ]
 	mem[ cfa ]( cfa )
 }// EXECUTE
-function colon( cfa ){ // run-time
+function colondef( cfa ){ // run-time
 	do {
 		cfa ++; mem[ cfa ]( cfa )
 	} while( !fexit )
 	fexit = 0
-}// colon
+}// colondef
 function EXIT(){ fexit ++ }
 function variable( cfa ){ mem[ sp ++ ] = cfa + 1 }
 function constant( cfa ){ mem[ sp ++ ] = mem[ cfa + 1 ] }
@@ -194,9 +220,15 @@ var latest = defword( ".s", 0, [ DOT_S ])
 latest = defword( "key", latest, [ KEY ])
 latest = defword( "base", latest, [ variable, 10 ])
 my_base = latest - 1 // base !
+function HEX(){ mem[ my_base ] = 16 }
+function DECIMAL(){ mem[ my_base ] = 10 }
 latest = defword( "@", latest, [ FETCH ])
 latest = defword( "!", latest, [ STORE ])
 latest = defword( "cr", latest, [ CR ])
+latest = defword( "hex", latest, [ HEX ])
+latest = defword( "decimal", latest, [ DECIMAL ])
+latest = defword( "expect", latest, [ EXPECT ])
+
 
 // function tick(){ ftick ++ }
 // function comma(){ mem.push( st.pop() )}
@@ -243,8 +275,8 @@ function evl( tok ){
 
 $( document ).ready( function(){
 	dump()
+	$( 'input.tib' ).off('.mytib').on( 'keypress.mytib', monitor_handler ).focus()
 	$('pre#myterm')[0].innerText += " ok "
-	$( 'input.tib' ).off('.mytib').on( 'keypress.mytib', ret_handler ).focus()
 }) // ready
 </script>
 
