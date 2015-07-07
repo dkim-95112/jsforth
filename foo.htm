@@ -14,14 +14,15 @@
 <script>
 "use strict"
 var mem = [] // memory map
-var here = 1 // dictionary - can't use link = 0
 var sp0 = 300, sp = sp0 // parameter stack
-var tib0 = 400, tib = tib0 // text input buffer
+var rp0 = 400, rp = rp0 // parameter stack
+var tib0 = 500; function TIB() { mem[ sp ++ ] = tib0 }// ( --- tib )
+var latest = 0; function LATEST(){ mem[ sp ++ ] = latest }// ( --- adr )
+var here = 1 // 0 reserved for end-of-list marker
+function HERE(){ mem[ sp ++ ] = here }// ( --- adr )
 
 // The words:
-// : (colon)
-// POSTPONE
-// ' (tick)
+// : (colon), POSTPONE, ' (tick)
 // are examples of parsing words that take their arguments from the user input device instead of the data stack.
 
 var fexit = 0, fabort = 0, fexpect = 0
@@ -64,14 +65,12 @@ function DOT_S(){
 // which executes like this: decade <ret> 0 1 2 3 4 5 6 7 8 9 ok
 
 function DUP(){	mem[ sp ++ ] = mem[ sp - 1 ] } // ( n --- n n )
-
 // There are five FORTH words concerned with finding the address of the various word fields. They are:
 // 1) ' ( tick)
 // 2) PFAPTR ( Parameter Field Pointer Address) - ?RSC-FORTH User's guide
 // 3) CFA ( Code Field Address)
 // 4) LFA ( Link Field Address)
 // 5) NFA ( Name Field Address)
-function CFA(){	mem[ sp - 1 ] -= 1 }// ( pfa --- cfa )
 
 // cell  | byt0|  1  |  2  |  3  | description
 // ------+-----+-----+-----+-----+------------
@@ -80,16 +79,22 @@ function CFA(){	mem[ sp - 1 ] -= 1 }// ( pfa --- cfa )
 // lfa 2 | previous nfa, 0 eol   | link
 // cfa 3 |                       | code
 // pfa 4 | data                  | parameter
+function PFA(){ // ( nfa --- pfa )
+	var nfa = mem[ sp - 1 ], n = mem[ nfa ] >> 24 & 0x1f
+	mem[ sp - 1 ] += parseInt( ( n + 4 ) / 4 ) + 2
+}
+function CFA(){	mem[ sp - 1 ] -= 1 } // ( pfa --- cfa )
 function FIND()
 {	// adr1 adr2 --- pfa count-byte tf (ok)
 	// adr1 adr2 --- ff (?)
 	var adr2 = mem[ -- sp ], adr1 = mem[ -- sp ]
-	var n1 = mem[ adr1 ] >> 24, s1 = str( adr1 )
+	var n1 = mem[ adr1 ] >> 24 & 0x1f, s1 = str( adr1 )
 	do {
-		var n2 = mem[ adr2 ] >> 24
-		if( n2 === n1 ){// count hit ?
+		var n2 = mem[ adr2 ] >> 24 & 0x1f
+		if( n2 === n1 ){ // count hit ?
 			if( str( adr2 ) === s1 ){
-				mem[ sp ++ ] = adr2 + parseInt( ( n2 + 4 ) / 4 ) + 2 // pfa
+				mem[ sp ++ ] = adr2 // nfa
+				PFA() // ( nfa --- pfa )
 				mem[ sp ++ ] = n2 // count byte
 				mem[ sp ++ ] = true
 				return
@@ -102,7 +107,6 @@ function ABORT(){
 	sp = sp0 // reset stack
 	fabort ++
 }
-var my_base
 function NUMBER(){ // ( addr --- d )
 	var s = str( mem[ -- sp ] ),  d = parseInt( s, mem[ my_base ] )
 	if( isNaN( d ) ){
@@ -118,28 +122,23 @@ function dump(){
 		}).join('\n')
 	)// text
 }// dump
+var my_jstib = [] // javascript array tib, text input buf
 function monitor_handler( e ){
 	if( e.which === 13 ){ // return key
-		$('pre#myterm')[0].innerText += this.value + '\n'
-		$.each(
-			this.value.split(/\s/).filter(Boolean),
-			function( i , v ){
-				evl( v )
-				if( fabort ){
-					return false
-				}
-			}
-		); // each
+		$('pre#myterm')[0].innerText += this.value + '\n' // appendn
+		my_jstib = this.value.split(/\s/).filter(Boolean)
 		this.value = null
+		evl()
 		if( fabort ){
 			$('pre#myterm')[0].innerText += " ? "
 			fabort = 0
 		} else {
-			if( !fexpect ){
+			if( fexpect ){
+				debugger
+			} else {
 				$('pre#myterm')[0].innerText += " ok "
 			}// if expect
 		}// if abort
-		dump()
 	}// if return
 }// monitor_handler
 function KEY(){// ( --- char )
@@ -159,21 +158,26 @@ function EXPECT(){// ( adr n --- )
 	function expect_handler(e){
 		fexpect --
 		if( fexpect === 0 || e.charCode === 13 ){// reached n or CR ?
-			if( fexpect ){
+			if( fexpect ){// got CR ?
 				fexpect = 0
-			} else {
+			} else {// got n char codes
 				$('pre#myterm')[0].innerText += String.fromCharCode(
 					mem[ adr ++ ] = e.charCode
 				)
 			}// if
 			mem[ adr ++ ] = 0 // terminaten
-			$('input.tib').off('.mytib').on( 'keypress.mytib', monitor_handler )
-			$('pre#myterm')[0].innerText += " ok "
+			debugger
+			if( rp > rp0 ){// restart ip (on return stack)
+				colondef()
+			} else {// back to monitor
+				$('input.tib').off('.mytib').on( 'keypress.mytib', monitor_handler )
+				$('pre#myterm')[0].innerText += " ok "
+			}// if
 		} else {
 			$('pre#myterm')[0].innerText += String.fromCharCode(
 				mem[ adr ++ ] = e.charCode
 			)
-		}
+		}// if
 		return false // don't show key in input element, show in myterm
 	}// expect_handler
 	$('input.tib').off('.mytib').on( 'keypress.mytib', expect_handler )
@@ -186,23 +190,40 @@ function EXECUTE(){ // ( cfa --- )
 	// . CONSTANT words
 	// . DOES> words
 	// . CODE-definition assembler words
-	var cfa = mem[ -- sp ]
-	mem[ cfa ]( cfa )
+	mem[
+		mem[ rp ++ ] = mem[ -- sp ] // >rp, init return stack
+	]() // and away...
 }// EXECUTE
-function colondef( cfa ){ // run-time
-	do {
-		cfa ++; mem[ cfa ]( cfa )
-	} while( !fexit )
-	fexit = 0
+function colondef(){ // run cfa's in parm list ?
+	debugger
+	while( 1 ){
+		mem[
+			++ mem[ rp - 1 ] // incrementn ip, on top of return stack ?
+		]()
+		if( fexit ){
+			rp -- // pop return stack
+			fexit = 0
+			break
+		} else {
+			if( fexpect ){// input ?
+				break
+			}// if expect
+		}// if exit
+	}// while 1
 }// colondef
+function LIT(){
+	mem[ sp ++ ] = mem[
+		++ mem[ rp - 1 ] // literal at next ip ?
+	]
+}// LIT
 function EXIT(){ fexit ++ }
 function variable( cfa ){ mem[ sp ++ ] = cfa + 1 }
 function constant( cfa ){ mem[ sp ++ ] = mem[ cfa + 1 ] }
-function FETCH(){ // ( adr --- n )
-	var adr = mem[ -- sp ]; mem[ sp ++ ] = mem[ adr ]
+function FETCH(){// ( adr --- n )
+	mem[ sp - 1 ] = mem[ mem[ sp - 1 ] ]
 }
-function STORE(){ // ( n adr --- )
-	var adr = mem[ -- sp ], n = mem[ -- sp ]; mem[ adr ] = n
+function STORE(){// ( n adr --- )
+	mem[ mem[ sp - 1 ] ] = mem[ sp - 2 ]; sp -= 2
 }
 function CR(){ $('pre#myterm')[0].innerText += '\n' }
 
@@ -215,41 +236,47 @@ function defword( tok, lnk, plist ){
 	}// for
 	return nfa
 }// defword
-
-var latest = defword( ".s", 0, [ DOT_S ])
+latest = defword( "latest", latest, [ LATEST ])
+latest = defword( "here", latest, [ HERE ])
+latest = defword( ".s", latest, [ DOT_S ])
 latest = defword( "key", latest, [ KEY ])
-latest = defword( "base", latest, [ variable, 10 ])
-my_base = latest - 1 // base !
-function HEX(){ mem[ my_base ] = 16 }
-function DECIMAL(){ mem[ my_base ] = 10 }
+latest = defword( "base", latest, [ variable, 0 ])
+// latest = defword( "hex", latest, [ colondef, LIT, 16, TICK, "base", STORE, EXIT ])
+// latest = defword( "decimal", latest, [ DECIMAL ])
 latest = defword( "@", latest, [ FETCH ])
 latest = defword( "!", latest, [ STORE ])
 latest = defword( "cr", latest, [ CR ])
-latest = defword( "hex", latest, [ HEX ])
-latest = defword( "decimal", latest, [ DECIMAL ])
 latest = defword( "expect", latest, [ EXPECT ])
+latest = defword( "'", latest, [
+	colondef, TIB, LIT, 31, EXPECT, LATEST, FIND, EXIT
+])
+latest = defword( "state", latest, [ variable, 0 ])
 
-
-// function tick(){ ftick ++ }
-// function comma(){ mem.push( st.pop() )}
-// function semicolon(){ fcolon = 0 }
-// function doesgt(){ fcolon = 2 }
-// function rtliteral(){ fliteral ++ }
-// function xtick(xt){ st.push(xt) }
-
-function evl( tok ){
-	pushstr(tib, tok )
-	mem[ sp ++ ] = tib // input buffer
-	mem[ sp ++ ] = latest // nfa
-	FIND() // ( a1 a2 --- pfa n tf ) or ( a1 a2 --- ff )
-	if( mem[ -- sp ] ){
-		var n = mem[ -- sp ] // count byte
-		CFA() // ( pfa --- cfa )
-		EXECUTE() // ( cfa --- )
-	} else {
-		mem[ sp ++ ] = tib
-		NUMBER() // ( a1 --- d )
-	}// if
+function evl(){
+	while( my_jstib.length ){
+		pushstr(tib0, my_jstib.shift() ) // loadn tib from javascript array ?
+		mem[ sp ++ ] = tib0 // text input buffer
+		fexpect = 0 // clearn ?
+		if( rp > rp0 ){// ip on return stack ?
+			colondef()
+		} else {// dictionary lookup
+			mem[ sp ++ ] = latest // dictionary nfa
+			FIND() // ( a1 a2 --- pfa n tf ) or ( a1 a2 --- ff )
+			if( mem[ -- sp ] ){
+				var n = mem[ -- sp ] // count byte
+				CFA() // ( pfa --- cfa )
+				EXECUTE() // ( cfa --- )
+			} else {
+				mem[ sp ++ ] = tib0
+				NUMBER() // ( a1 --- d )
+			}// if
+		}// if rp
+		if( fabort ){
+			my_jstib.length = 0 // clear js input array ?
+			fabort = 0
+			break
+		}// if abort
+	}// while jstib.length
 }// evl
 
 // Enter some numbers on the stack and display the stack contents.
@@ -263,7 +290,6 @@ function evl( tok ){
 // EMPTY OK
 // KEY <RETURN> A ( Type A) .S
 // 41
-//                                 <--- todo: i'm here
 // HEX 600 OK
 // DECIMAL OK
 // 15 CR EXPECT
@@ -271,8 +297,11 @@ function evl( tok ){
 // HEX 600 10 DUMP
 // 600 31 32 33 34 35 36 37 38 39 30 31 32 33 34 35 0
 // OK
+//                                 <--- todo: i'm here
 // : TEST-OP 5 * . ; <RETURN> OK
-
+// ' TEST-OP <RETURN> OK
+// .S
+// 432 OK
 $( document ).ready( function(){
 	dump()
 	$( 'input.tib' ).off('.mytib').on( 'keypress.mytib', monitor_handler ).focus()
